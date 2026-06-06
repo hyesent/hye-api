@@ -108,7 +108,8 @@ async def ai_proxy(req: AIRequest):
     if not HF_TOKEN:
         return {"response": "Error: HF_TOKEN not set on server"}
 
-    API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-Coder-7B-Instruct"
+    # CHANGED THIS LINE ONLY - Qwen gated -> Phi-3 open
+    API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
         system = "You are Hyecode AI. Respond with files in this EXACT format:\n\nFILE: src/App.jsx\n```jsx\n// code here\n```\n\nRULES: Start every file with FILE: path/name.ext. Wrap code in ``` blocks.\n"
@@ -126,14 +127,18 @@ async def ai_proxy(req: AIRequest):
                 json={
                     "inputs": full_prompt,
                     "parameters": {
-                        "max_new_tokens": 3000,
-                        "temperature": 0.7,
+                        "max_new_tokens": 1024, # Phi-3 works better with 1024
+                        "temperature": 0.2, # Lower temp = more accurate fixes
                         "return_full_text": False,
                         "do_sample": True
                     }
                 }
             )
 
+            if r.status_code == 401:
+                return {"response": "HF Error: Invalid token. Check HF_TOKEN in Render."}
+            if r.status_code == 403:
+                return {"response": "HF Error: Model gated. This shouldn't happen with Phi-3."}
             if r.status_code == 503:
                 return {"response": "Model is loading on HF servers. Try again in 20 seconds."}
             if r.status_code!= 200:
@@ -143,6 +148,8 @@ async def ai_proxy(req: AIRequest):
             if isinstance(data, list) and len(data) > 0:
                 generated = data[0].get("generated_text", "")
                 return {"response": generated.strip()}
+            elif isinstance(data, dict) and "error" in data:
+                return {"response": f"HF Error: {data['error']}"}
             return {"response": str(data)}
 
     except Exception as e:
