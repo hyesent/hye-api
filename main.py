@@ -77,6 +77,9 @@ class PDFTableRequest(BaseModel):
     rows: list
     filename: str = "table.pdf"
 
+class FixRequest(BaseModel):
+    code: str
+
 # ===== 1. ROOT + HEALTH =====
 @app.get("/")
 def root():
@@ -84,7 +87,7 @@ def root():
         "status": "HYE API Running",
         "version": "1.0.0",
         "endpoints": [
-            "/ai", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
+            "/ai", "/fix", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
             "/templates/list", "/extensions", "/sdk/vision/ocr", "/sdk/pdf/table"
         ]
     }
@@ -143,6 +146,19 @@ async def ai_proxy(req: AIRequest):
 
     except Exception as e:
         return {"response": f"AI Error: {str(e)}"}
+
+# ===== 2.5. FIX ENDPOINT - ADDED FOR ONLINE FIX =====
+@app.post("/fix")
+async def fix_code(req: FixRequest):
+    try:
+        fixed = req.code
+        # Basic server-side fixes without AI
+        fixed = re.sub(r'([^=!])==([^=])', r'\1=== \2', fixed)
+        fixed = re.sub(r'([^=!])!=([^=])', r'\1!== \2', fixed)
+        fixed = re.sub(r'console\.log\(\)', 'console.log("")', fixed)
+        return {"fixed": fixed}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ===== 3. TERMINAL WEBSOCKET =====
 @app.websocket("/ws/terminal/{user_id}")
