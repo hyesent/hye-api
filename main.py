@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
