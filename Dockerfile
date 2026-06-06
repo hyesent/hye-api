@@ -1,10 +1,24 @@
-FROM python:3.11-slim
+ FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y tesseract-ocr wget unzip && rm -rf /var/lib/apt/lists/*
+# Install system packages
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    wget \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
+# Set working directory
 WORKDIR /app
-COPY requirements.txt.
+
+# Copy requirements and install Python packages
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py.
+# Copy all project files
+COPY . .
+
+# Expose Render port
+EXPOSE 10000
+
+# Start FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
