@@ -5,18 +5,18 @@ import io
 import json
 import re
 import socket
+import requests
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-import httpx
 from supabase import create_client, Client
 from PIL import Image
 import pytesseract
 from fpdf import FPDF
 
-# ===== FIX 1: Force IPv4 DNS for Render =====
+# ===== FIX: Force IPv4 DNS for Render free tier =====
 socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (args[0], args[1]))]
 
 # ===== ENV VARS - SET THESE IN RENDER =====
@@ -105,7 +105,7 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT - FIXED =====
+# ===== 2. AI ENDPOINT - FIXED WITH REQUESTS =====
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
     HF_TOKEN = os.getenv("HF_TOKEN")
@@ -123,40 +123,40 @@ async def ai_proxy(req: AIRequest):
         full_prompt = f"{req.prompt}\n\nCurrent code context:\n{req.code}"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(
-                API_URL,
-                headers={"Authorization": f"Bearer {HF_TOKEN}"},
-                json={
-                    "inputs": full_prompt,
-                    "parameters": {
-                        "max_new_tokens": 1024,
-                        "temperature": 0.2,
-                        "return_full_text": False,
-                        "do_sample": True
-                    }
+        r = requests.post(
+            API_URL,
+            headers={"Authorization": f"Bearer {HF_TOKEN}"},
+            json={
+                "inputs": full_prompt,
+                "parameters": {
+                    "max_new_tokens": 1024,
+                    "temperature": 0.2,
+                    "return_full_text": False,
+                    "do_sample": True
                 }
-            )
+            },
+            timeout=60
+        )
 
-            if r.status_code == 401:
-                raise HTTPException(status_code=401, detail="HF Error: Invalid token. Check HF_TOKEN in Render.")
-            if r.status_code == 403:
-                raise HTTPException(status_code=403, detail="HF Error: Model gated.")
-            if r.status_code == 503:
-                raise HTTPException(status_code=503, detail="Model is loading on HF servers. Try again in 20 seconds.")
-            if r.status_code!= 200:
-                raise HTTPException(status_code=r.status_code, detail=f"HF API Error {r.status_code}: {r.text}")
+        if r.status_code == 401:
+            raise HTTPException(status_code=401, detail="HF Error: Invalid token. Check HF_TOKEN in Render.")
+        if r.status_code == 403:
+            raise HTTPException(status_code=403, detail="HF Error: Model gated.")
+        if r.status_code == 503:
+            raise HTTPException(status_code=503, detail="Model is loading on HF servers. Try again in 20 seconds.")
+        if r.status_code!= 200:
+            raise HTTPException(status_code=r.status_code, detail=f"HF API Error {r.status_code}: {r.text}")
 
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                generated = data[0].get("generated_text", "")
-                return {"response": generated.strip()}
-            elif isinstance(data, dict) and "error" in data:
-                raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
-            return {"response": str(data)}
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0:
+            generated = data[0].get("generated_text", "")
+            return {"response": generated.strip()}
+        elif isinstance(data, dict) and "error" in data:
+            raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
+        return {"response": str(data)}
 
     except Exception as e:
-        print(f"HYE AI ERROR: {repr(e)}") # This go show for Render logs
+        print(f"HYE AI ERROR: {repr(e)}")
         raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
 
 # ===== 2.6. GENERATE ENDPOINT - FOR HYE EDITOR =====
