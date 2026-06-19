@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import re
+import socket
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,9 @@ from supabase import create_client, Client
 from PIL import Image
 import pytesseract
 from fpdf import FPDF
+
+# ===== FIX 1: Force IPv4 DNS for Render =====
+socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (args[0], args[1]))]
 
 # ===== ENV VARS - SET THESE IN RENDER =====
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -101,14 +105,13 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT =====
+# ===== 2. AI ENDPOINT - FIXED =====
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
     HF_TOKEN = os.getenv("HF_TOKEN")
     if not HF_TOKEN:
-        return {"response": "Error: HF_TOKEN not set on server"}
+        raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
 
-    # CHANGED THIS LINE ONLY - Qwen gated -> Phi-3 open
     API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
@@ -127,8 +130,8 @@ async def ai_proxy(req: AIRequest):
                 json={
                     "inputs": full_prompt,
                     "parameters": {
-                        "max_new_tokens": 1024, # Phi-3 works better with 1024
-                        "temperature": 0.2, # Lower temp = more accurate fixes
+                        "max_new_tokens": 1024,
+                        "temperature": 0.2,
                         "return_full_text": False,
                         "do_sample": True
                     }
@@ -136,51 +139,54 @@ async def ai_proxy(req: AIRequest):
             )
 
             if r.status_code == 401:
-                return {"response": "HF Error: Invalid token. Check HF_TOKEN in Render."}
+                raise HTTPException(status_code=401, detail="HF Error: Invalid token. Check HF_TOKEN in Render.")
             if r.status_code == 403:
-                return {"response": "HF Error: Model gated. This shouldn't happen with Phi-3."}
+                raise HTTPException(status_code=403, detail="HF Error: Model gated.")
             if r.status_code == 503:
-                return {"response": "Model is loading on HF servers. Try again in 20 seconds."}
+                raise HTTPException(status_code=503, detail="Model is loading on HF servers. Try again in 20 seconds.")
             if r.status_code!= 200:
-                return {"response": f"HF API Error {r.status_code}: {r.text}"}
+                raise HTTPException(status_code=r.status_code, detail=f"HF API Error {r.status_code}: {r.text}")
 
             data = r.json()
             if isinstance(data, list) and len(data) > 0:
                 generated = data[0].get("generated_text", "")
                 return {"response": generated.strip()}
             elif isinstance(data, dict) and "error" in data:
-                return {"response": f"HF Error: {data['error']}"}
+                raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
             return {"response": str(data)}
 
     except Exception as e:
-        return {"response": f"AI Error: {str(e)}"}
+        print(f"HYE AI ERROR: {repr(e)}") # This go show for Render logs
+        raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
+
 # ===== 2.6. GENERATE ENDPOINT - FOR HYE EDITOR =====
 class GenerateRequest(BaseModel):
     prompt: str
-    type: str = "template"  # template, help, ask
+    type: str = "template" # template, help, ask
 
 @app.post("/generate")
 async def generate_for_editor(req: GenerateRequest):
     mode_map = {
         "template": "build",
-        "help": "ask", 
+        "help": "ask",
         "ask": "ask"
     }
-    
+
     ai_req = AIRequest(
         prompt=req.prompt,
         mode=mode_map.get(req.type, "ask"),
         code="",
         user_id=""
     )
-    
+
     result = await ai_proxy(ai_req)
-    
+
     return {
         "code": result.get("response", ""),
         "result": result.get("response", ""),
         "explanation": f"Generated via {req.type} mode"
     }
+
 # ===== 2.5. FIX ENDPOINT - ADDED FOR ONLINE FIX =====
 @app.post("/fix")
 async def fix_code(req: FixRequest):
