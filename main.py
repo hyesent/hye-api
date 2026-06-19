@@ -4,7 +4,7 @@ import base64
 import io
 import json
 import re
-import requests
+import httpx
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,16 +101,30 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT - DIRECT IP FIX FOR RENDER =====
+# ===== 2. AI ENDPOINT - DNS-OVER-HTTPS FIX FOR RENDER =====
+async def resolve_hf_ip():
+    """Use Google DNS-over-HTTPS to resolve HF domain since Render blocks normal DNS"""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://dns.google/resolve",
+                params={"name": "api-inference.huggingface.co", "type": "A"},
+                timeout=10
+            )
+            data = r.json()
+            if data.get("Answer"):
+                return data["Answer"][0]["data"] # Return first IP
+    except:
+        pass
+    return None
+
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
     HF_TOKEN = os.getenv("HF_TOKEN")
     if not HF_TOKEN:
         raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
 
-    # BYPASS RENDER DNS: Use direct Cloudflare IP for api-inference.huggingface.co
-    HF_IP = "104.18.6.192"
-    API_URL = f"https://{HF_IP}/models/microsoft/Phi-3-mini-4k-instruct"
+    API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
         system = "You are Hyecode AI. Respond with files in this EXACT format:\n\nFILE: src/App.jsx\n```jsx\n// code here\n```\n\nRULES: Start every file with FILE: path/name.ext. Wrap code in ``` blocks.\n"
@@ -121,42 +135,49 @@ async def ai_proxy(req: AIRequest):
         full_prompt = f"{req.prompt}\n\nCurrent code context:\n{req.code}"
 
     try:
-        r = requests.post(
-            API_URL,
-            headers={
-                "Authorization": f"Bearer {HF_TOKEN}",
-                "Host": "api-inference.huggingface.co", # Tells Cloudflare which site we want
-                "Content-Type": "application/json"
-            },
-            json={
-                "inputs": full_prompt,
-                "parameters": {
-                    "max_new_tokens": 1024,
-                    "temperature": 0.2,
-                    "return_full_text": False,
-                    "do_sample": True
+        # Resolve IP manually via DoH to avoid Render DNS block
+        hf_ip = await resolve_hf_ip()
+
+        async with httpx.AsyncClient(verify=True, timeout=60.0) as client:
+            headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+            # If we got IP, connect directly with Host header for SNI
+            if hf_ip:
+                headers["Host"] = "api-inference.huggingface.co"
+                url = f"https://{hf_ip}/models/microsoft/Phi-3-mini-4k-instruct"
+            else:
+                url = API_URL # Fallback to normal domain
+
+            r = await client.post(
+                url,
+                headers=headers,
+                json={
+                    "inputs": full_prompt,
+                    "parameters": {
+                        "max_new_tokens": 1024,
+                        "temperature": 0.2,
+                        "return_full_text": False,
+                        "do_sample": True
+                    }
                 }
-            },
-            timeout=60,
-            verify=True
-        )
+            )
 
-        if r.status_code == 401:
-            raise HTTPException(status_code=401, detail="HF Error: Invalid token. Check HF_TOKEN in Render.")
-        if r.status_code == 403:
-            raise HTTPException(status_code=403, detail="HF Error: Model gated or no access.")
-        if r.status_code == 503:
-            raise HTTPException(status_code=503, detail="Model is loading on HF servers. Try again in 20 seconds.")
-        if r.status_code!= 200:
-            raise HTTPException(status_code=r.status_code, detail=f"HF API Error {r.status_code}: {r.text}")
+            if r.status_code == 401:
+                raise HTTPException(status_code=401, detail="HF Error: Invalid token")
+            if r.status_code == 403:
+                raise HTTPException(status_code=403, detail="HF Error: Model gated")
+            if r.status_code == 503:
+                raise HTTPException(status_code=503, detail="Model is loading. Try again in 20s")
+            if r.status_code!= 200:
+                raise HTTPException(status_code=r.status_code, detail=f"HF API Error: {r.text}")
 
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            generated = data[0].get("generated_text", "")
-            return {"response": generated.strip()}
-        elif isinstance(data, dict) and "error" in data:
-            raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
-        return {"response": str(data)}
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                generated = data[0].get("generated_text", "")
+                return {"response": generated.strip()}
+            elif isinstance(data, dict) and "error" in data:
+                raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
+            return {"response": str(data)}
 
     except Exception as e:
         print(f"HYE AI ERROR: {repr(e)}")
