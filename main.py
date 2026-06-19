@@ -154,7 +154,33 @@ async def ai_proxy(req: AIRequest):
 
     except Exception as e:
         return {"response": f"AI Error: {str(e)}"}
+# ===== 2.6. GENERATE ENDPOINT - FOR HYE EDITOR =====
+class GenerateRequest(BaseModel):
+    prompt: str
+    type: str = "template"  # template, help, ask
 
+@app.post("/generate")
+async def generate_for_editor(req: GenerateRequest):
+    mode_map = {
+        "template": "build",
+        "help": "ask", 
+        "ask": "ask"
+    }
+    
+    ai_req = AIRequest(
+        prompt=req.prompt,
+        mode=mode_map.get(req.type, "ask"),
+        code="",
+        user_id=""
+    )
+    
+    result = await ai_proxy(ai_req)
+    
+    return {
+        "code": result.get("response", ""),
+        "result": result.get("response", ""),
+        "explanation": f"Generated via {req.type} mode"
+    }
 # ===== 2.5. FIX ENDPOINT - ADDED FOR ONLINE FIX =====
 @app.post("/fix")
 async def fix_code(req: FixRequest):
