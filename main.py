@@ -101,30 +101,17 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT - DNS-OVER-HTTPS FIX FOR RENDER =====
-async def resolve_hf_ip():
-    """Use Google DNS-over-HTTPS to resolve HF domain since Render blocks normal DNS"""
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://dns.google/resolve",
-                params={"name": "api-inference.huggingface.co", "type": "A"},
-                timeout=10
-            )
-            data = r.json()
-            if data.get("Answer"):
-                return data["Answer"][0]["data"] # Return first IP
-    except:
-        pass
-    return None
-
+# ===== 2. AI ENDPOINT - HARDCODED IP + SNI FOR RENDER FREE TIER =====
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
     HF_TOKEN = os.getenv("HF_TOKEN")
     if not HF_TOKEN:
         raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
 
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
+    # HARDCODED IP: Bypasses all DNS. SNI handled by Host header
+    HF_IP = "104.18.6.192"
+    HOST = "api-inference.huggingface.co"
+    API_URL = f"https://{HF_IP}/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
         system = "You are Hyecode AI. Respond with files in this EXACT format:\n\nFILE: src/App.jsx\n```jsx\n// code here\n```\n\nRULES: Start every file with FILE: path/name.ext. Wrap code in ``` blocks.\n"
@@ -135,22 +122,20 @@ async def ai_proxy(req: AIRequest):
         full_prompt = f"{req.prompt}\n\nCurrent code context:\n{req.code}"
 
     try:
-        # Resolve IP manually via DoH to avoid Render DNS block
-        hf_ip = await resolve_hf_ip()
+        # Custom transport: connect to IP but use HOST for SNI + SSL cert validation
+        transport = httpx.AsyncHTTPTransport(
+            retries=2,
+            verify=True
+        )
 
-        async with httpx.AsyncClient(verify=True, timeout=60.0) as client:
-            headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-            # If we got IP, connect directly with Host header for SNI
-            if hf_ip:
-                headers["Host"] = "api-inference.huggingface.co"
-                url = f"https://{hf_ip}/models/microsoft/Phi-3-mini-4k-instruct"
-            else:
-                url = API_URL # Fallback to normal domain
-
+        async with httpx.AsyncClient(transport=transport, timeout=60.0) as client:
             r = await client.post(
-                url,
-                headers=headers,
+                API_URL,
+                headers={
+                    "Authorization": f"Bearer {HF_TOKEN}",
+                    "Host": HOST, # Critical for SNI + Cloudflare routing
+                    "Content-Type": "application/json"
+                },
                 json={
                     "inputs": full_prompt,
                     "parameters": {
@@ -159,7 +144,9 @@ async def ai_proxy(req: AIRequest):
                         "return_full_text": False,
                         "do_sample": True
                     }
-                }
+                },
+                # Tell httpx to validate cert against HOST not IP
+                extensions={"sni_hostname": HOST}
             )
 
             if r.status_code == 401:
