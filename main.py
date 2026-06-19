@@ -4,7 +4,6 @@ import base64
 import io
 import json
 import re
-import httpx
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +13,7 @@ from supabase import create_client, Client
 from PIL import Image
 import pytesseract
 from fpdf import FPDF
+from huggingface_hub import InferenceClient
 
 # ===== ENV VARS - SET THESE IN RENDER =====
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -33,6 +33,11 @@ app.add_middleware(
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# HF CLIENT - handles all the DNS/SSL nonsense for us
+hf_client = None
+if HF_TOKEN:
+    hf_client = InferenceClient(token=HF_TOKEN)
 
 # ===== TERMINAL RULES =====
 LIGHT_PACKAGES = {
@@ -101,17 +106,11 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT - HARDCODED IP + SNI FOR RENDER FREE TIER =====
+# ===== 2. AI ENDPOINT - USING HUGGINGFACE_HUB TO BYPASS RENDER ISSUES =====
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
-    HF_TOKEN = os.getenv("HF_TOKEN")
-    if not HF_TOKEN:
+    if not hf_client:
         raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
-
-    # HARDCODED IP: Bypasses all DNS. SNI handled by Host header
-    HF_IP = "104.18.6.192"
-    HOST = "api-inference.huggingface.co"
-    API_URL = f"https://{HF_IP}/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
         system = "You are Hyecode AI. Respond with files in this EXACT format:\n\nFILE: src/App.jsx\n```jsx\n// code here\n```\n\nRULES: Start every file with FILE: path/name.ext. Wrap code in ``` blocks.\n"
@@ -122,52 +121,25 @@ async def ai_proxy(req: AIRequest):
         full_prompt = f"{req.prompt}\n\nCurrent code context:\n{req.code}"
 
     try:
-        # Custom transport: connect to IP but use HOST for SNI + SSL cert validation
-        transport = httpx.AsyncHTTPTransport(
-            retries=2,
-            verify=True
+        # huggingface_hub handles DNS, SSL, SNI, retries automatically
+        response = await asyncio.to_thread(
+            hf_client.text_generation,
+            prompt=full_prompt,
+            model="microsoft/Phi-3-mini-4k-instruct",
+            max_new_tokens=1024,
+            temperature=0.2,
+            do_sample=True,
+            return_full_text=False
         )
 
-        async with httpx.AsyncClient(transport=transport, timeout=60.0) as client:
-            r = await client.post(
-                API_URL,
-                headers={
-                    "Authorization": f"Bearer {HF_TOKEN}",
-                    "Host": HOST, # Critical for SNI + Cloudflare routing
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "inputs": full_prompt,
-                    "parameters": {
-                        "max_new_tokens": 1024,
-                        "temperature": 0.2,
-                        "return_full_text": False,
-                        "do_sample": True
-                    }
-                },
-                # Tell httpx to validate cert against HOST not IP
-                extensions={"sni_hostname": HOST}
-            )
-
-            if r.status_code == 401:
-                raise HTTPException(status_code=401, detail="HF Error: Invalid token")
-            if r.status_code == 403:
-                raise HTTPException(status_code=403, detail="HF Error: Model gated")
-            if r.status_code == 503:
-                raise HTTPException(status_code=503, detail="Model is loading. Try again in 20s")
-            if r.status_code!= 200:
-                raise HTTPException(status_code=r.status_code, detail=f"HF API Error: {r.text}")
-
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                generated = data[0].get("generated_text", "")
-                return {"response": generated.strip()}
-            elif isinstance(data, dict) and "error" in data:
-                raise HTTPException(status_code=500, detail=f"HF Error: {data['error']}")
-            return {"response": str(data)}
+        return {"response": response.strip()}
 
     except Exception as e:
         print(f"HYE AI ERROR: {repr(e)}")
+        if "loading" in str(e).lower():
+            raise HTTPException(status_code=503, detail="Model is loading. Try again in 20s")
+        if "unauthorized" in str(e).lower() or "401" in str(e):
+            raise HTTPException(status_code=401, detail="HF Error: Invalid token")
         raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
 
 # ===== 2.6. GENERATE ENDPOINT - FOR HYE EDITOR =====
