@@ -4,7 +4,6 @@ import base64
 import io
 import json
 import re
-import socket
 import requests
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
@@ -15,9 +14,6 @@ from supabase import create_client, Client
 from PIL import Image
 import pytesseract
 from fpdf import FPDF
-
-# ===== FIX: Force IPv4 DNS for Render free tier =====
-socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (args[0], args[1]))]
 
 # ===== ENV VARS - SET THESE IN RENDER =====
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -105,14 +101,16 @@ def health():
         "supabase_set": bool(SUPABASE_URL)
     }
 
-# ===== 2. AI ENDPOINT - FIXED WITH REQUESTS =====
+# ===== 2. AI ENDPOINT - DIRECT IP FIX FOR RENDER =====
 @app.post("/ai")
 async def ai_proxy(req: AIRequest):
     HF_TOKEN = os.getenv("HF_TOKEN")
     if not HF_TOKEN:
         raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
 
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
+    # BYPASS RENDER DNS: Use direct Cloudflare IP for api-inference.huggingface.co
+    HF_IP = "104.18.6.192"
+    API_URL = f"https://{HF_IP}/models/microsoft/Phi-3-mini-4k-instruct"
 
     if req.mode == "build":
         system = "You are Hyecode AI. Respond with files in this EXACT format:\n\nFILE: src/App.jsx\n```jsx\n// code here\n```\n\nRULES: Start every file with FILE: path/name.ext. Wrap code in ``` blocks.\n"
@@ -125,7 +123,11 @@ async def ai_proxy(req: AIRequest):
     try:
         r = requests.post(
             API_URL,
-            headers={"Authorization": f"Bearer {HF_TOKEN}"},
+            headers={
+                "Authorization": f"Bearer {HF_TOKEN}",
+                "Host": "api-inference.huggingface.co", # Tells Cloudflare which site we want
+                "Content-Type": "application/json"
+            },
             json={
                 "inputs": full_prompt,
                 "parameters": {
@@ -135,13 +137,14 @@ async def ai_proxy(req: AIRequest):
                     "do_sample": True
                 }
             },
-            timeout=60
+            timeout=60,
+            verify=True
         )
 
         if r.status_code == 401:
             raise HTTPException(status_code=401, detail="HF Error: Invalid token. Check HF_TOKEN in Render.")
         if r.status_code == 403:
-            raise HTTPException(status_code=403, detail="HF Error: Model gated.")
+            raise HTTPException(status_code=403, detail="HF Error: Model gated or no access.")
         if r.status_code == 503:
             raise HTTPException(status_code=503, detail="Model is loading on HF servers. Try again in 20 seconds.")
         if r.status_code!= 200:
