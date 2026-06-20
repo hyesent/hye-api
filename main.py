@@ -7,7 +7,6 @@ import re
 import subprocess
 import shlex
 import zipfile
-import httpx
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +22,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") # service_role key
 
 # ===== INIT =====
-app = FastAPI(title="HYE Ecosystem API", version="1.0.0")
+app = FastAPI(title="HYE Ecosystem API", version="1.0.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,19 +59,6 @@ HEAVY_PACKAGES = {
 
 BLOCKED_COMMANDS = ["docker", "sudo", "apt-get", "pip install", "yarn add", "pnpm add"]
 
-TEMPLATES = {
-    "react": {"url": "https://cdn.hye.app/templates/react-vite.zip", "size": "2MB", "desc": "React 18 + Vite + Tailwind"},
-    "react-ts": {"url": "https://cdn.hye.app/templates/react-ts.zip", "size": "2.5MB", "desc": "React + TS + Tailwind"},
-    "vue": {"url": "https://cdn.hye.app/templates/vue-vite.zip", "size": "1.8MB", "desc": "Vue 3 + Vite"},
-    "vanilla": {"url": "https://cdn.hye.app/templates/vanilla.zip", "size": "800KB", "desc": "HTML + JS + Tailwind"},
-    "nextjs": {"url": "https://cdn.hye.app/templates/next-lite.zip", "size": "8MB", "desc": "Next.js 14 Lite"},
-    "express": {"url": "https://cdn.hye.app/templates/express.zip", "size": "1MB", "desc": "Express API + CORS"},
-    "astro": {"url": "https://cdn.hye.app/templates/astro.zip", "size": "5MB", "desc": "Astro + MDX Blog"},
-    "svelte": {"url": "https://cdn.hye.app/templates/svelte.zip", "size": "1.5MB", "desc": "Svelte + Vite"},
-    "solid": {"url": "https://cdn.hye.app/templates/solid.zip", "size": "1.2MB", "desc": "SolidJS + Vite"},
-    "note-app": {"url": "https://cdn.hye.app/templates/note-app.zip", "size": "3MB", "desc": "OCR Note App Clone"},
-}
-
 # ===== MODELS =====
 class AIRequest(BaseModel):
     prompt: str
@@ -97,7 +83,7 @@ class GenerateRequest(BaseModel):
     type: str = "template" # template, help, ask
 
 class HyeCreateRequest(BaseModel):
-    type: str # react, vue, etc
+    type: str # react, vue, vanilla, express
     name: str # testapp
 
 # ===== 1. ROOT + HEALTH =====
@@ -105,7 +91,7 @@ class HyeCreateRequest(BaseModel):
 def root():
     return {
         "status": "HYE API Running",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "endpoints": [
             "/ai", "/fix", "/exec", "/hye-create", "/ws/terminal/{user_id}",
             "/help/marketplace", "/help/terminal", "/templates/list",
@@ -250,53 +236,227 @@ async def exec_command(req: ExecRequest):
             "code": 1
         }
 
-# ===== 2.8. HYE-CREATE ENDPOINT - FOR ANDROID APK =====
+# ===== 2.8. HYE-CREATE ENDPOINT - BUILDS TEMPLATES ON THE FLY =====
 @app.post("/hye-create")
 async def hye_create(req: HyeCreateRequest):
     template = req.type
     project_name = req.name
 
-    if template not in TEMPLATES:
-        raise HTTPException(404, f"Template '{template}' not found")
+    if not project_name.replace('-', '').replace('_', '').isalnum():
+        raise HTTPException(400, "Project name must be alphanumeric")
 
-    url = TEMPLATES[template]["url"]
+    new_zip_buffer = io.BytesIO()
 
     try:
-        # 1. Download template zip from CDN
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30)
-            resp.raise_for_status()
-            zip_bytes = resp.content
+        with zipfile.ZipFile(new_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
 
-        # 2. Repackage with project name as root folder
-        old_zip = zipfile.ZipFile(io.BytesIO(zip_bytes))
-        new_zip_buffer = io.BytesIO()
+            # Shared.gitignore
+            gitignore = "node_modules\ndist\n.env\n"
+            zip_file.writestr(f"{project_name}/.gitignore", gitignore)
 
-        with zipfile.ZipFile(new_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as new_zip:
-            for file_info in old_zip.infolist():
-                # Replace template folder name with project_name
-                new_path = file_info.filename
-                if "/" in new_path:
-                    parts = new_path.split("/", 1)
-                    new_path = f"{project_name}/{parts[1]}" if len(parts) > 1 else f"{project_name}/{new_path}"
-                else:
-                    new_path = f"{project_name}/{new_path}"
+            if template == "react":
+                # React + Vite
+                zip_file.writestr(f"{project_name}/package.json", json.dumps({
+                    "name": project_name,
+                    "private": True,
+                    "version": "0.0.0",
+                    "type": "module",
+                    "scripts": {
+                        "dev": "vite",
+                        "build": "vite build",
+                        "preview": "vite preview"
+                    },
+                    "dependencies": {
+                        "react": "^18.3.1",
+                        "react-dom": "^18.3.1"
+                    },
+                    "devDependencies": {
+                        "@vitejs/plugin-react": "^4.3.2",
+                        "vite": "^5.4.8"
+                    }
+                }, indent=2))
 
-                new_zip.writestr(new_path, old_zip.read(file_info.filename))
+                zip_file.writestr(f"{project_name}/index.html", '''<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HYE App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>''')
 
-        # 3. Convert to raw base64 - NO data: prefix
+                zip_file.writestr(f"{project_name}/vite.config.js", '''import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+})''')
+
+                zip_file.writestr(f"{project_name}/src/main.jsx", '''import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)''')
+
+                zip_file.writestr(f"{project_name}/src/App.jsx", '''function App() {
+  return (
+    <div style={{padding: 20, fontFamily: 'sans-serif'}}>
+      <h1>Welcome to HYE 🚀</h1>
+      <p>Edit <code>src/App.jsx</code> and save to reload.</p>
+    </div>
+  )
+}
+
+export default App''')
+
+            elif template == "vue":
+                # Vue 3 + Vite
+                zip_file.writestr(f"{project_name}/package.json", json.dumps({
+                    "name": project_name,
+                    "private": True,
+                    "version": "0.0.0",
+                    "type": "module",
+                    "scripts": {
+                        "dev": "vite",
+                        "build": "vite build",
+                        "preview": "vite preview"
+                    },
+                    "dependencies": {
+                        "vue": "^3.4.37"
+                    },
+                    "devDependencies": {
+                        "@vitejs/plugin-vue": "^5.1.2",
+                        "vite": "^5.4.8"
+                    }
+                }, indent=2))
+
+                zip_file.writestr(f"{project_name}/index.html", '''<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HYE Vue App</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>''')
+
+                zip_file.writestr(f"{project_name}/vite.config.js", '''import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+})''')
+
+                zip_file.writestr(f"{project_name}/src/main.js", '''import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')''')
+
+                zip_file.writestr(f"{project_name}/src/App.vue", '''<template>
+  <div style="padding: 20px; font-family: sans-serif;">
+    <h1>Welcome to HYE Vue 🚀</h1>
+    <p>Edit <code>src/App.vue</code> and save to reload.</p>
+  </div>
+</template>''')
+
+            elif template == "vanilla":
+                # Vanilla JS + Vite
+                zip_file.writestr(f"{project_name}/package.json", json.dumps({
+                    "name": project_name,
+                    "private": True,
+                    "version": "0.0.0",
+                    "type": "module",
+                    "scripts": {
+                        "dev": "vite",
+                        "build": "vite build",
+                        "preview": "vite preview"
+                    },
+                    "devDependencies": {
+                        "vite": "^5.4.8"
+                    }
+                }, indent=2))
+
+                zip_file.writestr(f"{project_name}/index.html", '''<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HYE Vanilla App</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>''')
+
+                zip_file.writestr(f"{project_name}/main.js", '''document.querySelector('#app').innerHTML = `
+  <div style="padding: 20px; font-family: sans-serif;">
+    <h1>Welcome to HYE Vanilla 🚀</h1>
+    <p>Edit <code>main.js</code> and save to reload.</p>
+  </div>
+`''')
+
+                zip_file.writestr(f"{project_name}/vite.config.js", '''import { defineConfig } from 'vite'
+
+export default defineConfig({})''')
+
+            elif template == "express":
+                # Express API
+                zip_file.writestr(f"{project_name}/package.json", json.dumps({
+                    "name": project_name,
+                    "version": "1.0.0",
+                    "main": "index.js",
+                    "scripts": {
+                        "start": "node index.js",
+                        "dev": "node index.js"
+                    },
+                    "dependencies": {
+                        "express": "^4.19.2",
+                        "cors": "^2.8.5"
+                    }
+                }, indent=2))
+
+                zip_file.writestr(f"{project_name}/index.js", '''const express = require('express');
+const cors = require('cors');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.json({ message: 'Welcome to HYE Express API 🚀' });
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});''')
+
+            else:
+                raise HTTPException(404, f"Template '{template}' not supported. Try: react, vue, vanilla, express")
+
+        # Convert to raw base64
         new_zip_buffer.seek(0)
         zip_base64 = base64.b64encode(new_zip_buffer.read()).decode('utf-8')
 
         return {
             "success": True,
             "filename": f"{project_name}.zip",
-            "data": zip_base64, # <- raw base64 only
+            "data": zip_base64,
             "path": f"/HYE-Projects/{project_name}"
         }
 
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"CDN download failed: {str(e)}")
     except Exception as e:
         raise HTTPException(500, f"Create failed: {str(e)}")
 
@@ -339,43 +499,22 @@ async def terminal_ws(websocket: WebSocket, user_id: str):
 
             if cmd == "hye create" or cmd == "hye create list":
                 await websocket.send_text("Available templates:\n\n")
-                for name, data in TEMPLATES.items():
-                    await websocket.send_text(f" {name:<12} {data['size']:<8} - {data['desc']}\n")
-                await websocket.send_text(f"\nUsage: hye create react\n")
+                await websocket.send_text(" react 2KB - React 18 + Vite\n")
+                await websocket.send_text(" vue 2KB - Vue 3 + Vite\n")
+                await websocket.send_text(" vanilla 1KB - HTML + JS + Vite\n")
+                await websocket.send_text(" express 1KB - Express API + CORS\n")
+                await websocket.send_text(f"\nUsage: hye create react myapp\n")
                 await websocket.send_text(f"hye@{user_id}:~$ ")
                 continue
 
             if cmd.startswith("hye create "):
-                template = cmd.split()[-1]
-                if template not in TEMPLATES:
-                    await websocket.send_text(f"❌ Template '{template}' not found. Run 'hye create' to list.\n")
-                    await websocket.send_text(f"hye@{user_id}:~$ ")
-                    continue
-
-                url = TEMPLATES[template]["url"]
-                size = TEMPLATES[template]["size"]
-                await websocket.send_text(f"📦 Downloading {template} template... {size}\n")
-
-                proc = await asyncio.create_subprocess_shell(
-                    f"cd {work_dir} && wget -q {url} -O {template}.zip && unzip -q -o {template}.zip && rm {template}.zip",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode == 0:
-                    await websocket.send_text(f"✅ Created {template}/\n")
-                    await websocket.send_text(f"✅ Next: cd {template} && npm run dev\n")
-                else:
-                    err = stderr.decode() or "Download failed"
-                    await websocket.send_text(f"❌ Failed: {err}\n")
-
+                await websocket.send_text(f"❌ Use the HYE Terminal app for 'hye create'. WebSocket only supports basic commands.\n")
                 await websocket.send_text(f"hye@{user_id}:~$ ")
                 continue
 
             if "npm create" in cmd or "npx create" in cmd or "create-react-app" in cmd or "yarn create" in cmd:
                 await websocket.send_text("❌ Blocked: Use 'hye create <template>' instead\n")
-                await websocket.send_text("💡 Run 'hye create' to see 10 fast templates\n")
+                await websocket.send_text("💡 Run 'hye create' to see templates\n")
                 await websocket.send_text(f"hye@{user_id}:~$ ")
                 continue
 
@@ -474,8 +613,10 @@ def help_terminal():
 def list_templates():
     return {
         "templates": [
-            {"name": name, "size": data["size"], "desc": data["desc"]}
-            for name, data in TEMPLATES.items()
+            {"name": "react", "size": "2KB", "desc": "React 18 + Vite"},
+            {"name": "vue", "size": "2KB", "desc": "Vue 3 + Vite"},
+            {"name": "vanilla", "size": "1KB", "desc": "HTML + JS + Vite"},
+            {"name": "express", "size": "1KB", "desc": "Express API + CORS"}
         ]
     }
 
