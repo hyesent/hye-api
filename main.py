@@ -9,10 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-import httpx
 from supabase import create_client, Client
-from PIL import Image
-import pytesseract
 from fpdf import FPDF
 import google.generativeai as genai
 
@@ -79,9 +76,6 @@ class AIRequest(BaseModel):
     code: str = ""
     user_id: str = ""
 
-class OCRRequest(BaseModel):
-    image: str # base64
-
 class PDFTableRequest(BaseModel):
     rows: list
     filename: str = "table.pdf"
@@ -97,7 +91,7 @@ def root():
         "version": "1.0.0",
         "endpoints": [
             "/ai", "/fix", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
-            "/templates/list", "/extensions", "/sdk/vision/ocr", "/sdk/pdf/table"
+            "/templates/list", "/extensions", "/sdk/pdf/table"
         ]
     }
 
@@ -379,17 +373,6 @@ async def install_extension(ext_id: int, user_id: str):
     return {"status": "installed", "deep_link": f"hye://editor?install={ext_id}"}
 
 # ===== 6. HYE SDK ENDPOINTS =====
-@app.post("/sdk/vision/ocr")
-async def hye_ocr(req: OCRRequest, x_hye_api_key: str = Header(None)):
-    # TODO: Add rate limit check with x_hye_api_key
-    try:
-        image_data = base64.b64decode(req.image)
-        image = Image.open(io.BytesIO(image_data))
-        text = pytesseract.image_to_string(image)
-        return {"text": text.strip(), "confidence": 0.9}
-    except Exception as e:
-        raise HTTPException(400, f"OCR failed: {str(e)}")
-
 @app.post("/sdk/pdf/table")
 async def hye_pdf_table(req: PDFTableRequest, x_hye_api_key: str = Header(None)):
     # TODO: Add rate limit check
