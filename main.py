@@ -22,7 +22,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") # service_role key
 
 # ===== INIT =====
-app = FastAPI(title="HYE Ecosystem API", version="1.0.2")
+app = FastAPI(title="HYE Ecosystem API", version="1.0.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -91,7 +91,7 @@ class HyeCreateRequest(BaseModel):
 def root():
     return {
         "status": "HYE API Running",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "endpoints": [
             "/ai", "/fix", "/exec", "/hye-create", "/ws/terminal/{user_id}",
             "/help/marketplace", "/help/terminal", "/templates/list",
@@ -178,7 +178,8 @@ async def fix_code(req: FixRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ===== 2.7. EXEC ENDPOINT - FOR HYE TERMINAL ANDROID =====
-ALLOWED_CMDS = {"npm", "npx", "node", "git", "ls", "pwd", "echo", "mkdir", "cat"}
+# Added rm, cp, mv, touch, cd, clear for basic file ops
+ALLOWED_CMDS = {"npm", "npx", "node", "git", "ls", "pwd", "echo", "mkdir", "cat", "rm", "cp", "mv", "touch", "cd", "clear"}
 WORKSPACE = "/tmp/hye-projects"
 os.makedirs(WORKSPACE, exist_ok=True)
 
@@ -193,6 +194,14 @@ async def exec_command(req: ExecRequest):
         return {
             "stdout": "",
             "stderr": f"Command '{base_cmd}' not allowed",
+            "code": 1
+        }
+
+    # Block dangerous rm flags
+    if base_cmd == "rm" and "-rf /" in req.cmd:
+        return {
+            "stdout": "",
+            "stderr": "Blocked: rm -rf / not allowed",
             "code": 1
         }
 
@@ -487,7 +496,9 @@ async def terminal_ws(websocket: WebSocket, user_id: str):
                     " hye create react - Download template\n"
                     " npm run dev - Start server\n"
                     " npm install axios - Install light packages\n"
-                    " git add. && git commit -m 'msg'\n\n"
+                    " git add. && git commit -m 'msg'\n"
+                    " rm -rf folder - Delete files\n"
+                    " ls, cd, mkdir, touch - File ops\n\n"
                     "❌ BLOCKED:\n"
                     " npm create vite - Use 'hye create' instead\n"
                     " npm install - Install one by one\n"
@@ -598,7 +609,9 @@ def help_terminal():
             {"cmd": "npm run dev", "desc": "Start your app"},
             {"cmd": "npm install axios", "desc": "Install light packages"},
             {"cmd": "git add. && git commit -m 'msg'", "desc": "Save code"},
-            {"cmd": "ls", "desc": "List files"}
+            {"cmd": "ls", "desc": "List files"},
+            {"cmd": "rm -rf folder", "desc": "Delete files"},
+            {"cmd": "cd folder", "desc": "Change directory"}
         ],
         "blocked": [
             {"cmd": "npm create vite", "reason": "Use 'hye create' instead"},
