@@ -4,6 +4,8 @@ import base64
 import io
 import json
 import re
+import subprocess
+import shlex
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,6 +85,11 @@ class PDFTableRequest(BaseModel):
 class FixRequest(BaseModel):
     code: str
 
+class ExecRequest(BaseModel):
+    cmd: str
+    cwd: str = ""
+    projectName: str = ""
+
 # ===== 1. ROOT + HEALTH =====
 @app.get("/")
 def root():
@@ -90,7 +97,7 @@ def root():
         "status": "HYE API Running",
         "version": "1.0.0",
         "endpoints": [
-            "/ai", "/fix", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
+            "/ai", "/fix", "/exec", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
             "/templates/list", "/extensions", "/sdk/pdf/table"
         ]
     }
@@ -175,6 +182,65 @@ async def fix_code(req: FixRequest):
         return {"fixed": fixed}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ===== 2.7. EXEC ENDPOINT - FOR HYE TERMINAL ANDROID =====
+ALLOWED_CMDS = {"npm", "npx", "node", "git", "ls", "pwd", "echo", "mkdir", "cat"}
+WORKSPACE = "/tmp/hye-projects"
+os.makedirs(WORKSPACE, exist_ok=True)
+
+@app.post("/exec")
+async def exec_command(req: ExecRequest):
+    if not req.cmd.strip():
+        raise HTTPException(400, "cmd required")
+
+    # Security: whitelist base command
+    base_cmd = shlex.split(req.cmd)[0]
+    if base_cmd not in ALLOWED_CMDS:
+        return {
+            "stdout": "",
+            "stderr": f"Command '{base_cmd}' not allowed",
+            "code": 1
+        }
+
+    # Build working directory
+    work_dir = WORKSPACE
+    if req.projectName:
+        work_dir = os.path.join(WORKSPACE, req.projectName)
+        os.makedirs(work_dir, exist_ok=True)
+
+    if req.cwd:
+        work_dir = os.path.join(work_dir, req.cwd.lstrip('/'))
+        os.makedirs(work_dir, exist_ok=True)
+
+    try:
+        # Run with 5min timeout, 10MB output limit
+        result = subprocess.run(
+            req.cmd,
+            shell=True,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env={**os.environ, "CI": "true"} # npm less interactive
+        )
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "code": result.returncode,
+            "cwd": work_dir
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "stdout": "",
+            "stderr": "Command timed out after 5 minutes",
+            "code": 124
+        }
+    except Exception as e:
+        return {
+            "stdout": "",
+            "stderr": f"Exec failed: {str(e)}",
+            "code": 1
+        }
 
 # ===== 3. TERMINAL WEBSOCKET =====
 @app.websocket("/ws/terminal/{user_id}")
