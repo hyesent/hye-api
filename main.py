@@ -6,6 +6,8 @@ import json
 import re
 import subprocess
 import shlex
+import zipfile
+import httpx
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -90,15 +92,24 @@ class ExecRequest(BaseModel):
     cwd: str = ""
     projectName: str = ""
 
+class GenerateRequest(BaseModel):
+    prompt: str
+    type: str = "template" # template, help, ask
+
+class HyeCreateRequest(BaseModel):
+    type: str # react, vue, etc
+    name: str # testapp
+
 # ===== 1. ROOT + HEALTH =====
 @app.get("/")
 def root():
     return {
         "status": "HYE API Running",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "endpoints": [
-            "/ai", "/fix", "/exec", "/ws/terminal/{user_id}", "/help/marketplace", "/help/terminal",
-            "/templates/list", "/extensions", "/sdk/pdf/table"
+            "/ai", "/fix", "/exec", "/hye-create", "/ws/terminal/{user_id}",
+            "/help/marketplace", "/help/terminal", "/templates/list",
+            "/extensions", "/sdk/pdf/table"
         ]
     }
 
@@ -144,10 +155,6 @@ async def ai_proxy(req: AIRequest):
         return {"response": f"AI Error: {str(e)}"}
 
 # ===== 2.6. GENERATE ENDPOINT - FOR HYE EDITOR =====
-class GenerateRequest(BaseModel):
-    prompt: str
-    type: str = "template" # template, help, ask
-
 @app.post("/generate")
 async def generate_for_editor(req: GenerateRequest):
     mode_map = {
@@ -170,6 +177,7 @@ async def generate_for_editor(req: GenerateRequest):
         "result": result.get("response", ""),
         "explanation": f"Generated via {req.type} mode"
     }
+
 # ===== 2.5. FIX ENDPOINT - ADDED FOR ONLINE FIX =====
 @app.post("/fix")
 async def fix_code(req: FixRequest):
@@ -241,6 +249,56 @@ async def exec_command(req: ExecRequest):
             "stderr": f"Exec failed: {str(e)}",
             "code": 1
         }
+
+# ===== 2.8. HYE-CREATE ENDPOINT - FOR ANDROID APK =====
+@app.post("/hye-create")
+async def hye_create(req: HyeCreateRequest):
+    template = req.type
+    project_name = req.name
+
+    if template not in TEMPLATES:
+        raise HTTPException(404, f"Template '{template}' not found")
+
+    url = TEMPLATES[template]["url"]
+
+    try:
+        # 1. Download template zip from CDN
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=30)
+            resp.raise_for_status()
+            zip_bytes = resp.content
+
+        # 2. Repackage with project name as root folder
+        old_zip = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        new_zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(new_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as new_zip:
+            for file_info in old_zip.infolist():
+                # Replace template folder name with project_name
+                new_path = file_info.filename
+                if "/" in new_path:
+                    parts = new_path.split("/", 1)
+                    new_path = f"{project_name}/{parts[1]}" if len(parts) > 1 else f"{project_name}/{new_path}"
+                else:
+                    new_path = f"{project_name}/{new_path}"
+
+                new_zip.writestr(new_path, old_zip.read(file_info.filename))
+
+        # 3. Convert to raw base64 - NO data: prefix
+        new_zip_buffer.seek(0)
+        zip_base64 = base64.b64encode(new_zip_buffer.read()).decode('utf-8')
+
+        return {
+            "success": True,
+            "filename": f"{project_name}.zip",
+            "data": zip_base64, # <- raw base64 only
+            "path": f"/HYE-Projects/{project_name}"
+        }
+
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"CDN download failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(500, f"Create failed: {str(e)}")
 
 # ===== 3. TERMINAL WEBSOCKET =====
 @app.websocket("/ws/terminal/{user_id}")
